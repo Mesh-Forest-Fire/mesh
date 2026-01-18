@@ -98,6 +98,10 @@ def trigger_alerts():
     thread = threading.Thread(target=alert_thread, daemon=True)
     thread.start()
 
+def format_iso_timestamp(dt):
+    """Format datetime as ISO 8601 with milliseconds (3 decimals) and Z suffix."""
+    return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
 def submit_incident_to_api(incident_data: dict) -> bool:
     """Submit incident to API Gateway."""
     try:
@@ -170,7 +174,7 @@ def handle_message(sock, msg, addr):
             "source": {
                 "originNodeId": src_node,
                 "detectionMethod": "sensor",
-                "detectedAt": datetime.utcnow().isoformat() + "Z"
+                "detectedAt": format_iso_timestamp(datetime.utcnow())
             },
             "location": {
                 "coordinates": [
@@ -183,21 +187,13 @@ def handle_message(sock, msg, addr):
             "traversalPath": [
                 {
                     "hopIndex": idx,
-                    "nodeId": node_id,
-                    "nodeType": "edge" if idx == 0 else ("base" if node_id == BASE_NODE_ID else "relay"),
-                    "transport": {
-                        "protocol": "radio",
-                        "encrypted": False
-                    },
-                    "integrity": {
-                        "verified": True
-                    }
+                    "nodeId": node_id
                 }
                 for idx, node_id in enumerate(route)
             ],
             "baseReceipt": {
                 "baseNodeId": BASE_NODE_ID,
-                "receivedAt": datetime.utcnow().isoformat() + "Z",
+                "receivedAt": format_iso_timestamp(datetime.utcnow()),
                 "processingStatus": "queued"
             },
             "payload": {
