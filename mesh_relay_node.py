@@ -168,8 +168,23 @@ def main():
     t = threading.Thread(target=cleanup_seen_loop, daemon=True)
     t.start()
 
-    if sys.argv[1:] and sys.argv[1] == "test":
+    if sys.argv[1:] and sys.argv[1] == "test-hello":
         send_new(sock, {"type": "hello", "msg": f"node {NODE_ID} online"})
+
+    if sys.argv[1:] and sys.argv[1] == "test-alert":
+        # Full mock alert message with all fields
+        mock_payload = {
+            "type": "alert",
+            "risk": 0.85,  # High risk value (0-1 scale)
+            "sensor_data": {
+                "temperature": 42.5,  # Celsius
+                "humidity": 15.2,     # Percentage
+                "air_quality": 180,   # AQI
+                "light": 450          # Lux
+            },
+            "metadata": {}
+        }
+        send_new(sock, mock_payload)
 
     # This listener is blocking
     listen_loop(sock)
