@@ -16,6 +16,6 @@ sudo iwconfig wlan0 channel 1
 sudo ip link set wlan0 up
 
 sudo ip addr flush dev wlan0
-sudo ip addr add 10.0.0.2/24 dev wlan0
+sudo ip addr add 10.0.0.2/24 broadcast 10.0.0.255 dev wlan0
 
 echo "[*] Mesh mode active. You can now run your mesh script."
