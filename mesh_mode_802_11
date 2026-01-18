@@ -1,0 +1,19 @@
+#!/bin/bash
+set -e
+
+echo "[*] Switching to 802.11s MESH mode"
+
+sudo systemctl stop wpa_supplicant
+sudo systemctl stop NetworkManager 2>/dev/null || true
+sudo systemctl stop dhcpcd
+
+sudo ip link set wlan0 down
+sudo iw wlan0 set type mp
+sudo ip link set wlan0 up
+
+sudo iw wlan0 mesh join forestmesh freq 2412
+
+sudo ip addr flush dev wlan0
+sudo ip addr add 10.0.0.2/24 dev wlan0
+
+echo "[*] 802.11s mesh active."
