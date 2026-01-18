@@ -5,11 +5,11 @@ import threading
 import uuid
 
 # Hardcoded node metadata
-NODE_ID = "Relay_001" 
-NODE_LOCATION = {"lat": 49.2827, "lon": -123.1207}  # TODO: Set co-ords
+NODE_ID = "Relay_001" # ! We change this to a fixed ID for the respective Relay or Sentry node
+NODE_LOCATION = {"lat": 49.2827, "lon": -123.1207}  # ! We set a fixed location for the Relay or Sentry node
 
 BROADCAST_PORT = 5006
-BROADCAST_ADDR = "<broadcast>"  # uses interface broadcast
+BROADCAST_ADDR = "10.0.0.255"   # uses interface broadcast. Note: we must co-ordinate addresses with the mesh setup scripts
 TTL_DEFAULT = 8                 # max hops
 SEEN_EXPIRY_SEC = 60            # how long to remember message IDs
 
@@ -138,7 +138,7 @@ def main():
     t = threading.Thread(target=cleanup_seen_loop, daemon=True)
     t.start()
 
-    send_new(sock, {"type": "hello", "msg": f"node {NODE_ID} online"})
+    # send_new(sock, {"type": "hello", "msg": f"node {NODE_ID} online"})
 
     # This listener is blocking
     listen_loop(sock)
