@@ -1,18 +1,29 @@
 import socket
 import json
-import os
 import threading
-from mongo_interface import *
+import os
+import time
+import requests
+import logging
+from datetime import datetime
 
-# Connect to MongoDB at startup
-mongodb_enabled = False
-try:
-    connect_mongodb()
-    mongodb_enabled = True
-    print("MongoDB connection established")
-except Exception as e:
-    print(f"Warning: MongoDB connection failed: {e}")
-    print("Continuing without MongoDB...")
+# Configure logger
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+# API Gateway configuration
+API_GATEWAY_URL = "https://api-gateway-production-df4f.up.railway.app/api"
+API_TIMEOUT = 10  # seconds
+
+# Alert deduplication configuration
+ALERT_COOLDOWN_SECONDS = 60  # Don't re-alert from same source within this period
+
+# Track last alert time per source node
+last_alert_times = {}  # node_id -> timestamp
+alert_lock = threading.Lock()
 
 sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
 sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
@@ -23,43 +34,60 @@ print("Listening on IPv6 port 6000")
 
 BASE_NODE_ID = "Base_001"
 
+def should_alert(node_id: str) -> bool:
+    """
+    Check if we should trigger alerts for this node.
+    Returns True if enough time has passed since last alert from this source.
+    """
+    with alert_lock:
+        now = time.time()
+        last_alert = last_alert_times.get(node_id)
+        
+        if last_alert is None:
+            # First alert from this node
+            last_alert_times[node_id] = now
+            return True
+        
+        time_since_last = now - last_alert
+        
+        if time_since_last >= ALERT_COOLDOWN_SECONDS:
+            # Cooldown period has passed
+            last_alert_times[node_id] = now
+            return True
+        
+        # Still in cooldown
+        logger.info(f"⏱️  Suppressing alert from {node_id} (cooldown: {time_since_last:.1f}s / {ALERT_COOLDOWN_SECONDS}s)")
+        return False
+
 def play_alert_sound():
     """Play an alert sound (platform-specific)."""
     try:
-        if os.name == 'nt':  # Windows
+        if os.name == 'nt':
             import winsound
-            # Play system exclamation sound 3 times
             for _ in range(3):
                 winsound.MessageBeep(winsound.MB_ICONHAND)
-        else:  # Linux/Mac
-            # Use system beep or play a sound file
-            os.system('paplay /usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga 2>/dev/null || beep -f 1000 -l 500 || echo -e "\a"')
+                time.sleep(0.3)
+        else:
+            os.system('paplay /usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga 2>/dev/null || beep')
     except Exception as e:
-        print(f"Could not play alert sound: {e}")
+        logger.error(f"Could not play alert sound: {e}")
 
 def show_red_screen():
     """Flash the terminal with red background."""
     try:
-        # ANSI escape codes for red background
         RED_BG = "\033[41m"
         RESET = "\033[0m"
         CLEAR = "\033[2J\033[H"
         
         for _ in range(3):
-            # Flash red
-            print(f"{CLEAR}{RED_BG}" + " " * 80 + "\n" * 20 + "  🚨 FIRE ALERT DETECTED 🚨  ".center(80) + "\n" * 20 + RESET, end="", flush=True)
-            import time
+            print(f"{CLEAR}{RED_BG}{' ' * 80}\n{' ' * 80}\n{'  🚨 FIRE ALERT DETECTED 🚨  '.center(80)}\n{' ' * 80}\n{' ' * 80}{RESET}")
             time.sleep(0.3)
-            # Clear
-            print(CLEAR, end="", flush=True)
-            time.sleep(0.2)
         
-        # Final alert message
         print(f"{RED_BG}{'='*80}")
         print(f"  🔥 FIRE ALERT RECEIVED 🔥  ".center(80))
         print(f"{'='*80}{RESET}\n")
     except Exception as e:
-        print(f"Could not show red screen: {e}")
+        logger.error(f"Could not show red screen: {e}")
 
 def trigger_alerts():
     """Trigger both sound and visual alerts in a separate thread."""
@@ -70,112 +98,140 @@ def trigger_alerts():
     thread = threading.Thread(target=alert_thread, daemon=True)
     thread.start()
 
-def handle_message(sock, msg, addr):
-    print(f"Handling message from {addr}: {msg}")
-    
+def submit_incident_to_api(incident_data: dict) -> bool:
+    """Submit incident to API Gateway."""
     try:
-        # Extract message components
-        msg_id = msg.get("id")
-        src_node = msg.get("src")
-        src_location = msg.get("src_location", {})
-        route = msg.get("route", [])
-        payload = msg.get("payload", {})
+        url = f"{API_GATEWAY_URL}/incidents"
+        logger.info(f"Submitting incident to API Gateway: {url}")
         
-        # Check if this is an alert message
-        if payload.get("type") != "alert":
-            print(f"Ignoring non-alert message type: {payload.get('type')}")
-            return
-        
-        # ALERT DETECTED - Trigger visual and audio warnings
-        trigger_alerts()
-        
-        sensor_data = payload.get("sensor_data", {})
-        
-        # Extract coordinates (lng, lat)
-        lng = src_location.get("lon", 0)
-        lat = src_location.get("lat", 0)
-        
-        # Message received means it passed threshold at source - mark as high severity
-        # If risk score is available in payload, use it; otherwise default to 8
-        risk_value = payload.get("risk")
-        if isinstance(risk_value, (int, float)) and 0 <= risk_value <= 1:
-            # Convert 0-1 risk to 1-10 severity scale
-            severity = max(1, min(10, int(risk_value * 10)))
-        else:
-            # Alert passed threshold at source, so it's significant
-            severity = 8
-        
-        # Create summary
-        summary = f"Fire risk detected - Temp: {sensor_data.get('temperature', 'N/A')}°C, Humidity: {sensor_data.get('humidity', 'N/A')}%"
-        
-        # Only attempt MongoDB operations if available
-        if not is_mongodb_available():
-            print("⚠ MongoDB not available - incident not stored")
-            return
-        
-        # Create incident in MongoDB
-        incident_id = create_incident(
-            incident_type="fire",
-            severity=severity,
-            origin_node_id=src_node,
-            detection_method="sensor",
-            coordinates=(lng, lat),
-            region_code="BC-VAN",  # Could be made dynamic based on location
-            base_node_id=BASE_NODE_ID,
-            summary=summary,
-            raw_data={
-                "sensor_data": sensor_data,
-                "message_id": msg_id,
-                "timestamp": msg.get("ts")
-            },
-            incident_id=msg_id  # Use message ID as incident ID for idempotency
+        response = requests.post(
+            url,
+            json=incident_data,
+            timeout=API_TIMEOUT,
+            headers={"Content-Type": "application/json"}
         )
         
-        # Add traversal hops from the route
-        for idx, node_id in enumerate(route):
-            # Determine node type based on naming convention
-            if "Sentry" in node_id or "Sensor" in node_id:
-                node_type = "edge"
-            elif "Relay" in node_id:
-                node_type = "relay"
-            elif "Base" in node_id:
-                node_type = "base"
-            else:
-                node_type = "relay"  # default
+        if response.status_code == 201:
+            logger.info(f"✅ Incident submitted successfully: {response.json().get('incidentId')}")
+            return True
+        else:
+            logger.warning(f"⚠ API returned non-201 status: {response.status_code} - {response.text}")
+            return False
             
-            add_traversal_hop(
-                incident_id=incident_id,
-                node_id=node_id,
-                node_type=node_type,
-                protocol="radio",  # Assuming radio for mesh network
-                encrypted=False,
-                verified=True
-            )
+    except requests.exceptions.Timeout:
+        logger.error(f"❌ API request timed out after {API_TIMEOUT}s")
+        return False
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"❌ Could not connect to API Gateway: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Error submitting to API: {e}")
+        return False
+
+def handle_message(sock, msg, addr):
+    logger.info(f"Handling message from {addr}: {msg}")
+    
+    try:
+        msg_id = msg.get("id")
+        payload = msg.get("payload", {})
+        msg_type = payload.get("type")
         
-        # Update processing status
-        update_base_receipt_status(incident_id, "completed")
+        if msg_type != "alert":
+            logger.debug(f"Ignoring non-alert message type: {msg_type}")
+            return
         
-        print(f"✓ Incident {incident_id} created and stored in MongoDB")
+        # Extract source node
+        src_node = msg.get("src", "unknown")
+        
+        logger.info(f"🔥 ALERT MESSAGE RECEIVED - ID: {msg_id} from {src_node}")
+        
+        # Check if we should trigger alerts (cooldown check)
+        if should_alert(src_node):
+            # Trigger visual and audio alerts
+            trigger_alerts()
+        else:
+            logger.info(f"📵 Alert suppressed due to cooldown")
+        
+        # Extract data from message (always submit to API regardless of alert status)
+        src_location = msg.get("src_location", {})
+        route = msg.get("route", [])
+        sensor_data = payload.get("sensor_data", {})
+        risk = payload.get("risk", 0.8)
+        
+        # Convert risk (0-1) to severity (1-10)
+        severity = max(1, min(10, int(risk * 10)))
+        
+        # Build incident data matching API schema
+        incident_data = {
+            "incidentId": msg_id,
+            "type": "fire",
+            "severity": severity,
+            "status": "open",
+            "source": {
+                "originNodeId": src_node,
+                "detectionMethod": "sensor",
+                "detectedAt": datetime.utcnow().isoformat() + "Z"
+            },
+            "location": {
+                "coordinates": [
+                    src_location.get("lon", 0),
+                    src_location.get("lat", 0)
+                ],
+                "regionCode": "UNKNOWN",  # Could extract from NODE_ID or add to mesh protocol
+                "description": f"Alert from {src_node}"
+            },
+            "traversalPath": [
+                {
+                    "hopIndex": idx,
+                    "nodeId": node_id,
+                    "nodeType": "edge" if idx == 0 else ("base" if node_id == BASE_NODE_ID else "relay"),
+                    "transport": {
+                        "protocol": "radio",
+                        "encrypted": False
+                    },
+                    "integrity": {
+                        "verified": True
+                    }
+                }
+                for idx, node_id in enumerate(route)
+            ],
+            "baseReceipt": {
+                "baseNodeId": BASE_NODE_ID,
+                "receivedAt": datetime.utcnow().isoformat() + "Z",
+                "processingStatus": "queued"
+            },
+            "payload": {
+                "summary": f"Fire risk detected: {risk:.2%} probability",
+                "raw": {
+                    "risk": risk,
+                    "sensor_data": sensor_data,
+                    "metadata": payload.get("metadata", {})
+                }
+            }
+        }
+        
+        logger.info(f"📤 Submitting incident to API Gateway...")
+        success = submit_incident_to_api(incident_data)
+        
+        if success:
+            logger.info("✅ Incident stored successfully via API Gateway")
+        else:
+            logger.warning("⚠ Failed to store incident via API Gateway")
         
     except Exception as e:
-        print(f"Error handling message: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"Error handling message: {e}", exc_info=True)
 
 while True:
     conn, addr = sock.accept()
-    conn.settimeout(5)  # Prevent hanging forever
+    conn.settimeout(5)
     try:
-        data = conn.recv(4096).decode()
+        data = conn.recv(8192)
         if data:
-            msg = json.loads(data)
-            print(f"Received from {addr}: {msg}")
+            msg = json.loads(data.decode())
             handle_message(sock, msg, addr)
-        else:
-            print(f"Connection from {addr} closed without data")
     except socket.timeout:
-        print(f"Timeout from {addr}")
+        logger.warning("Connection timed out")
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"Error: {e}")
     finally:
         conn.close()
