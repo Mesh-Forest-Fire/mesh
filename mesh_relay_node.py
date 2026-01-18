@@ -3,6 +3,7 @@ import json
 import time
 import threading
 import uuid
+import sys
 
 # Hardcoded node metadata
 NODE_ID = "Relay_001" # ! We change this to a fixed ID for the respective Relay or Sentry node
@@ -15,6 +16,30 @@ SEEN_EXPIRY_SEC = 60            # how long to remember message IDs
 
 seen_messages = {}              # msg_id -> timestamp
 seen_lock = threading.Lock()
+
+# If using Ethernet to connect to base station
+# If we had an extra Linux machine, it could have been done more dynamically, but Windows had some technical problems,
+#   so we fixed these manually
+LAPTOP_IP = "fe80::7695:45d4:6de6:726e"  
+LAPTOP_PORT = 6000
+IFACE = "eth0"
+
+def forward_to_laptop(msg_dict):
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        print("Laptop forward: created socket")
+        scope_id = socket.if_nametoindex(IFACE) 
+        print("Laptop forward: scope_id = ", scope_id)
+        addr = (LAPTOP_IP, LAPTOP_PORT, 0, scope_id)
+        print("Connecting to laptop at", (LAPTOP_IP, LAPTOP_PORT))
+        s.connect(addr)
+        print("Forwarding message to laptop:", msg_dict)
+        s.sendall((json.dumps(msg_dict) + "\n").encode())
+        print("Forwarded to laptop")
+        s.close()
+    except Exception as e:
+        print("Laptop forward error:", e)
+
 
 
 def now():
@@ -111,6 +136,11 @@ def handle_message(sock, msg_dict, addr):
 
     print(f"[{NODE_ID}] rebroadcasting {msg_id} with TTL={fwd['ttl']} route={route}")
     send_raw(sock, fwd)
+    
+    try:
+        forward_to_laptop(fwd)
+    except Exception as e:
+        print(f"[{NODE_ID}] error forwarding to laptop: {e}")
 
 
 
@@ -138,7 +168,8 @@ def main():
     t = threading.Thread(target=cleanup_seen_loop, daemon=True)
     t.start()
 
-    # send_new(sock, {"type": "hello", "msg": f"node {NODE_ID} online"})
+    if sys.argv[1:] and sys.argv[1] == "test":
+        send_new(sock, {"type": "hello", "msg": f"node {NODE_ID} online"})
 
     # This listener is blocking
     listen_loop(sock)
