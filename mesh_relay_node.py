@@ -170,6 +170,15 @@ def main():
 
     if sys.argv[1:] and sys.argv[1] == "test-hello":
         send_new(sock, {"type": "hello", "msg": f"node {NODE_ID} online"})
+        forward_to_laptop({
+            "id": "test-hello-msg",
+            "src": NODE_ID,
+            "src_location": NODE_LOCATION,
+            "ttl": TTL_DEFAULT,
+            "ts": now(),
+            "route": [NODE_ID],
+            "payload": {"type": "hello", "msg": f"node {NODE_ID} online"},
+        })
 
     if sys.argv[1:] and sys.argv[1] == "test-alert":
         # Full mock alert message with all fields
@@ -184,7 +193,17 @@ def main():
             },
             "metadata": {}
         }
+        forward_to_laptop({
+            "id": "test-alert-msg",
+            "src": NODE_ID,
+            "src_location": NODE_LOCATION,
+            "ttl": TTL_DEFAULT,
+            "ts": now(),
+            "route": [NODE_ID],
+            "payload": mock_payload,
+        })
         send_new(sock, mock_payload)
+        
 
     # This listener is blocking
     listen_loop(sock)

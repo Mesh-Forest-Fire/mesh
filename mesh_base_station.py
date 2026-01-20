@@ -5,7 +5,7 @@ import os
 import time
 import requests
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Configure logger
 logger = logging.getLogger(__name__)
@@ -89,6 +89,10 @@ def show_red_screen():
     except Exception as e:
         logger.error(f"Could not show red screen: {e}")
 
+def format_iso_timestamp(dt):
+    """Format datetime as ISO 8601 with milliseconds (3 decimals) and Z suffix."""
+    return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
 def trigger_alerts():
     """Trigger both sound and visual alerts in a separate thread."""
     def alert_thread():
@@ -98,15 +102,13 @@ def trigger_alerts():
     thread = threading.Thread(target=alert_thread, daemon=True)
     thread.start()
 
-def format_iso_timestamp(dt):
-    """Format datetime as ISO 8601 with milliseconds (3 decimals) and Z suffix."""
-    return dt.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-
 def submit_incident_to_api(incident_data: dict) -> bool:
     """Submit incident to API Gateway."""
     try:
         url = f"{API_GATEWAY_URL}/incidents"
-        logger.info(f"Submitting incident to API Gateway: {url}")
+        logger.info(f"🌐 Submitting incident to API Gateway: {url}")
+        payload_str = json.dumps(incident_data, indent=2)
+        logger.info(f"📋 Incident payload:\n{payload_str}")
         
         response = requests.post(
             url,
@@ -115,11 +117,24 @@ def submit_incident_to_api(incident_data: dict) -> bool:
             headers={"Content-Type": "application/json"}
         )
         
+        logger.info(f"📡 API Response Status: {response.status_code}")
+        
         if response.status_code == 201:
-            logger.info(f"✅ Incident submitted successfully: {response.json().get('incidentId')}")
+            try:
+                resp_json = response.json()
+                logger.info(f"✅ Incident submitted successfully: {resp_json.get('incidentId')}")
+            except:
+                logger.info(f"✅ Incident submitted successfully")
             return True
         else:
-            logger.warning(f"⚠ API returned non-201 status: {response.status_code} - {response.text}")
+            logger.warning(f"⚠ API returned non-201 status: {response.status_code}")
+            logger.warning(f"📥 Full API Response:\n{response.text}")
+            # Try to parse JSON error if available
+            try:
+                error_json = response.json()
+                logger.warning(f"📥 API Error JSON: {json.dumps(error_json, indent=2)}")
+            except:
+                pass
             return False
             
     except requests.exceptions.Timeout:
@@ -129,7 +144,7 @@ def submit_incident_to_api(incident_data: dict) -> bool:
         logger.error(f"❌ Could not connect to API Gateway: {e}")
         return False
     except Exception as e:
-        logger.error(f"❌ Error submitting to API: {e}")
+        logger.error(f"❌ Error submitting to API: {e}", exc_info=True)
         return False
 
 def handle_message(sock, msg, addr):
@@ -174,7 +189,7 @@ def handle_message(sock, msg, addr):
             "source": {
                 "originNodeId": src_node,
                 "detectionMethod": "sensor",
-                "detectedAt": format_iso_timestamp(datetime.utcnow())
+                "detectedAt": format_iso_timestamp(datetime.now(timezone.utc))
             },
             "location": {
                 "coordinates": [
@@ -193,20 +208,20 @@ def handle_message(sock, msg, addr):
             ],
             "baseReceipt": {
                 "baseNodeId": BASE_NODE_ID,
-                "receivedAt": format_iso_timestamp(datetime.utcnow()),
+                "receivedAt": format_iso_timestamp(datetime.now(timezone.utc)),
                 "processingStatus": "queued"
             },
             "payload": {
                 "summary": f"Fire risk detected: {risk:.2%} probability",
                 "raw": {
                     "risk": risk,
-                    "sensor_data": sensor_data,
-                    "metadata": payload.get("metadata", {})
+                    "sensor_data": sensor_data
                 }
             }
         }
         
         logger.info(f"📤 Submitting incident to API Gateway...")
+        logger.info(f"Route: {route}, Location: {src_location}")
         success = submit_incident_to_api(incident_data)
         
         if success:
